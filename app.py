@@ -1,122 +1,117 @@
+# app.py
 from flask import Flask, request, jsonify
-from functools import wraps
-import jwt
-import datetime 
+from flask_sqlalchemy import SQLAlchemy
 from werkzeug.security import generate_password_hash, check_password_hash
-
-# ===== Create Flask app =====
+import jwt
+import os
+import datetime
+from functools import wraps
+# App config
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+DB_PATH = os.path.join(BASE_DIR, "viclink.db")
 app = Flask(__name__)
-app.config['SECRET_KEY'] = "YOUR_SECRET_KEY" # Change this in production
-
-# ===== In-memory storage =====
-users = {} # {username: password_hash} 
-connection_requests = {} # {receiver: [requesters]} 
-connections = [] # [(user1, user2)]
-
-# ===== JWT Authentication Decorator =====
+app.config["SECRET_KEY"] = "viclink_secret"
+app.config["SQLALCHEMY_DATABASE_URI"] = f"sqlite:///viclink.db"
+app.config["SQLALCHEMY_TRACK_MODIFICATIONS"] = False
+db = SQLAlchemy(app)
+# Models
+class User(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    username = db.Column(db.String(100), unique=True, nullable=False)
+    password = db.Column(db.String(200), nullable=False)
+class Connection(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    sender_id = db.Column(db.Integer, db.ForeignKey("user.id"), nullable=False)
+    receiver_id = db.Column(db.Integer, db.ForeignKey("user.id"), nullable=False)
+    status = db.Column(db.String(30), default="pending")
+# Helpers
 def token_required(f):
     @wraps(f)
-    def decorated(*args,  **kwargs):
-        token = request.headers.get('x-access-token')
-        if not token:
-            return jsonify({'error': 'Token is missing!'}), 401
-        try:
-         data = jwt.decode(token, app.config['SECRET_KEY'],
-         algorithms=["HS256"])
-         current_user = data['username']
-        except:
-           return jsonify({'error': 'Token is invalid!'}), 401
-        return f(current_user, *args, **kwargs)
+    def decorated(*args, **kwargs):
+       token = request.headers.get("x-access-token")
+       if not token:
+         return jsonify({"error": "Token is missing!"}), 401
+       try:
+        data = jwt.decode(token, app.config["SECRET_KEY"], algorithms=["HS256"])
+        current_user = User.query.get(data["id"])
+       except:
+        return jsonify({"error": "Token is invalid or expired!"}), 401
+       return f(current_user, *args, **kwargs)
     return decorated
-
-# ===== Routes =====
-@app.route("/")
-def home():
-    return "Hello, VicLink is running!"
-@app.route("/status")
-def status():
-    return jsonify({ "status": "VicLink is live", "message": "Welcome!", "version": "1.0"})
-@app.route("/register", methods=["POST"])
-def register():
+# Auth Routes
+@app.route("/signup", methods=["POST"])
+def signup():
     data = request.json
-    username = data.get("username")
-    password = data.get("password")
-
-    if not username or not password:
-        return jsonify({"error": "Username and password are required"}), 400
-
-    if username in users:
-        return jsonify({"error": "Username already exists"}), 409
-    password_hash = generate_password_hash(password)
-    users[username] = password_hash
-
-    return jsonify({"message": f"User '{username}' registered successfully!"}), 201
-
+    if not data or not data.get("username") or not data.get("password"):
+       return jsonify({"error": "Username and password required"}), 400
+    if User.query.filter_by(username=data["username"]).first():
+       return jsonify({"error": "User already exists"}), 400
+    hashed_pw = generate_password_hash(data["password"], method="sha256")
+    new_user = User(username=data["username"], password=hashed_pw)
+    db.session.add(new_user)
+    db.session.commit()
+    return jsonify({"message": "User created successfully !"})
 @app.route("/login", methods=["POST"])
 def login():
     data = request.json
-    username = data.get("username")
-    password = data.get("password")
-
-    if username not in users or not check_password_hash(users[username], password):
-        return jsonify({"error": "Invalid username or password"}), 401
-        token = jwt.encode({ "username": username, "exp": datetime.datetime.utcnow() + datetime.timedelta(hours=24)}, app.config['SECRET_KEY'], algorithm="HS256")
-
-    return jsonify({"message": f"Welcome {username}!", "token": token})
-
-@app.route("/request_connection", methods=["POST"])
+    User = User.query.filter_by(username=data["username"]).first()
+    if not user or not check_password_hash(user.password, data["password"]):
+       return jsonify({"error": "Invalid credentials"}), 400
+    token = jwt.encode({"id": user.id, "exp": datetime.datetime.utcnow() + datetime.timedelta(hours=2)}, app.config["SECRET_KEY"], algorithm="HS256")
+    return jsonify({"token": token})
+# Connection Routes
+@app.route("/connection/request/<int:user_id>", methods=["POST"])
 @token_required
-def request_connection(current_user):
-    data = request.json
-    friend = data.get("friend") 
-    if friend not in users:
-        return jsonify({"error": "Friend user not found"}), 404
-    if friend not in connection_requests: 
-        connection_requests[friend] = []
-
-    if current_user in connection_requests[friend] or \
-    (current_user, friend) in connections or \
-    (friend, current_user) in connections:
-        return jsonify({"error": "Request already sent or already connected"}), 400
-
-    connection_requests[friend].append(current_user)
- 
-    return jsonify({"message": f"Connection request sent to {friend}."})
-
-@app.route("/respond_connection", methods=["POST"]) 
+def send_request(current_user, user_id):
+     if current_user.id == user_id:
+         return jsonify({"error": "You cannot connect with yourself"}), 400
+     existing = Connection.query.filter_by(sender_id=current_user.id,receiver_id=user_id).first()
+     if existing:
+        return jsonify({"error": "Request already send"}), 400
+     request_conn = Connection(sender_id=current_user.id, receiver_id=user_id)
+     db.session.add(request_conn)
+     db.session.commit()
+     return jsonify({"message": "Connection request sent!"})
+@app.route("/connection/respond/<int:request_id>", methods=["POST"])
 @token_required
-def respond_connection(current_user):
+def respond_request(current_user, request_id):
     data = request.json
-    requester = data.get("requester") 
-    accept = data.get("accept", False)
- 
-    if current_user not in connection_requests or requester not in connection_requests[current_user]:
-        return jsonify({"error": "No such connection request"}), 404
-
-    connection_requests[current_user].remove(requester)
-
-    if accept:
-            connections.append((current_user, requester))
-    return jsonify({"message": f"You are now connected with {requester}!"})
-
-    return jsonify({"message": f"You rejected the connection request from {requester}."})
-
-@app.route("/use_friend_internet", methods=["POST"]) 
+    req = connection_query.get(request_id)
+    if not req or req.receiver_id !=current_user.id:
+        return jsonify({"error": "Request not found"}), 404
+    if data.get("action") not in ["accept", "reject"]:
+        return jsonify({"error": "Invalid action"}), 400
+    req.status = "accepted" if data["action"] == "accept" else "rejected"
+    db.session.commit()
+    return jsonify({"message": f"Request {req.status}!"})
+@app.route("/connection/incoming", methods=["GET"])
 @token_required
-def use_friend_internet(current_user):
-    data = request.json
-    friend = data.get("friend")
- 
-    if (current_user, friend) not in connections and \
-       (friend,current_user) not in connections:
-        return jsonify({"error": "You are not connected with this friend"}), 403
-
-    return jsonify({"message": f"You are now remotely using {friend}'s internet via VicLink!"})
-
-@app.route("/viclink")
-def viclink():
-    return jsonify({"message": "Welcome to VicLink!"})
-
-# ===== Run the server =====
+def incoming_requests(current_user):
+     req = Connection.query.filter_by(receiver_id=current_user.id,status="pending").all()
+     return jsonify([{"id": r.id, "from": r.sender_id, "status": r.status} for r in reqs])
+@app.route("/friends", methods=["GET"])
+@token_required
+def friends_list(current_user):
+    connection = Connection.query.filter(((Connection.sender_id == current_user.id) | (Connection.receiver_id == current_user.id)) & (Connection.status == "accepted")).all()
+    friends = []
+    for c in connection:
+     friend_id = c.receiver_id if c.sender_id == current_user.id else c.sender_id
+     friend = User.query.get(friend_id)
+     friends.append({"id": friend.id, "username": friend.username})
+    return jsonify(friends)
+@app.route("/use-friend-internet/<int:friend_id>", methods=["POST"])
+@token_required
+def use_friend_internt(current_user, friend_id):
+     return jsonify({"message": f"You are now connected to {friend_id}`s internet via viclink"})
+@app.route("/config", methods=["GET", "POST"])
+@token_required
+def config_settings(current_user):
+    if request.method == "POST":
+      data = request.json
+      return jsonify({"message": "Settings saved", "data": data})
+    return jsonify({"theme": "blue-white", "notifications": True})
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=5000, debug=True)
+    with app.app_context():
+      db.create_all()
+    app.run(debug=True, host="0.0.0.0", port=5000)
+
