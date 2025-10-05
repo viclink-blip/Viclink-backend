@@ -15,6 +15,12 @@ app.config["SQLALCHEMY_DATABASE_URI"] = f"sqlite:///viclink.db"
 app.config["SQLALCHEMY_TRACK_MODIFICATIONS"] = False
 db = SQLAlchemy(app)
 # Models
+class Plan(db.Model):
+
+    id = db.Column(db.Integer,primary_key=True)
+    name = db.Column(db.String(50), unique=True, nullable=False)
+    price = db.Column(db.Integer, nullable=False)
+    max_receivers = db.Column(db.Integer, nullable=False)
 class User(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     username = db.Column(db.String(100), unique=True, nullable=False)
@@ -50,7 +56,7 @@ def signup():
     new_user = User(username=data["username"], password=hashed_pw)
     db.session.add(new_user)
     db.session.commit()
-    return jsonify({"message": "User created successfully !"})
+    return jsonify({"message": "User created successfully !","plan": "personal"})
 @app.route("/login", methods=["POST"])
 def login():
     data = request.json
@@ -99,10 +105,20 @@ def friends_list(current_user):
      friend = User.query.get(friend_id)
      friends.append({"id": friend.id, "username": friend.username})
     return jsonify(friends)
+@app.route("/plans",methods=["GET"])
+def list_plans():
+    plans = Plan.query.all()
+    return jsonify([{"id": p.id, "name": p.name, "price": p.price, "max_receivers": p.max_receivers} for p in plans])
 @app.route("/use-friend-internet/<int:friend_id>", methods=["POST"])
 @token_required
 def use_friend_internt(current_user, friend_id):
-     return jsonify({"message": f"You are now connected to {friend_id}`s internet via viclink"})
+    friend = User.query.get(friend_id)
+    if not friend:
+      return jsonify({"error": "Friend not found"}), 404
+    active_receivers = Connection.query.filter_by(sender_id=friend.id, status="accepted").count()
+    if active_receivers >=friend.plan.max_receivers:
+      return jsonify({"error": f"{friend.username}`s {friend.plan.name} plan limit reached"}),403
+      return jsonify({"message": f"You are now connected to {friend_id}`s internet via viclink","plan": friend.plan.name,"max_receivers": friend.plan.max_receivers})
 @app.route("/config", methods=["GET", "POST"])
 @token_required
 def config_settings(current_user):
@@ -110,8 +126,21 @@ def config_settings(current_user):
       data = request.json
       return jsonify({"message": "Settings saved", "data": data})
     return jsonify({"theme": "blue-white", "notifications": True})
+@app.route('/')
+def home():
+    return jsonify({"message": "Flask is working"})
+@app.route("/Viclink")
+def Viclink():
+   return jsonify({"message": "welcome to viclink"})
 if __name__ == "__main__":
-    with app.app_context():
-      db.create_all()
-    app.run(debug=True, host="0.0.0.0", port=5000)
+   with app.app_context():
+     db.drop_all()
+     db.create_all()
+     if not Plan.query.first():
+       personal = Plan(name="personal",price=400, max_receivers=1)
+       friends = Plan(name="Friends", price=700, max_receivers=3)
+       db.session.add_all([personal, friends])
+       db.session.commit()
+       print("plans added succefuly!")
+   app.run(debug=True, host="0.0.0.0", port=5000)
 
