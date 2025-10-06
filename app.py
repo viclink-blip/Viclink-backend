@@ -52,7 +52,7 @@ def signup():
        return jsonify({"error": "Username and password required"}), 400
     if User.query.filter_by(username=data["username"]).first():
        return jsonify({"error": "User already exists"}), 400
-    hashed_pw = generate_password_hash(data["password"], method="sha256")
+    hashed_pw = generate_password_hash(data["password"], method="pbkdf2:sha256")
     new_user = User(username=data["username"], password=hashed_pw)
     db.session.add(new_user)
     db.session.commit()
@@ -60,7 +60,7 @@ def signup():
 @app.route("/login", methods=["POST"])
 def login():
     data = request.json
-    User = User.query.filter_by(username=data["username"]).first()
+    user = User.query.filter_by(username=data["username"]).first()
     if not user or not check_password_hash(user.password, data["password"]):
        return jsonify({"error": "Invalid credentials"}), 400
     token = jwt.encode({"id": user.id, "exp": datetime.datetime.utcnow() + datetime.timedelta(hours=2)}, app.config["SECRET_KEY"], algorithm="HS256")
