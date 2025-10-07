@@ -4,12 +4,14 @@ from flask_sqlalchemy import SQLAlchemy
 from werkzeug.security import generate_password_hash, check_password_hash
 import jwt
 import os
-import datetime
+from datetime import datetime, timedelta
 from functools import wraps
+
 # App config
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DB_PATH = os.path.join(BASE_DIR, "viclink.db")
 app = Flask(__name__)
+plans = {}
 app.config["SECRET_KEY"] = "viclink_secret"
 app.config["SQLALCHEMY_DATABASE_URI"] = f"sqlite:///viclink.db"
 app.config["SQLALCHEMY_TRACK_MODIFICATIONS"] = False
@@ -65,6 +67,20 @@ def login():
        return jsonify({"error": "Invalid credentials"}), 400
     token = jwt.encode({"id": user.id, "exp": datetime.datetime.utcnow() + datetime.timedelta(hours=2)}, app.config["SECRET_KEY"], algorithm="HS256")
     return jsonify({"token": token})
+@app.route("/logout", methods=["POST"])
+def logout():
+    username = request.json.get("username")
+    return jsonify({"message":f"{username} logged out successfully."})
+@app.route("/payment", methods=["POST"])
+def payment():
+    username = request.json.get("username")
+    plan_type = request.json.get("plan_type")
+    if not username or not plan_type:
+       return jsonify({"error": "Username and plan_type are required."}), 400
+    start_date = datetime.now()
+    expiry_date = start_date + timedelta(days=30)
+    plans[username] = {"plan": plan_type, "expiry_date": expiry_date}
+    return jsonify({"massage": f"payment successful for {plan_type} plan.", "expiry_date": expiry_date})
 # Connection Routes
 @app.route("/connection/request/<int:user_id>", methods=["POST"])
 @token_required
@@ -109,6 +125,23 @@ def friends_list(current_user):
 def list_plans():
     plans = Plan.query.all()
     return jsonify([{"id": p.id, "name": p.name, "price": p.price, "max_receivers": p.max_receivers} for p in plans])
+@app.route("/free-trial", methods=["POST"])
+def free_trial():
+    username = request.json.get("username")
+    start_date = datetime.now()
+    expiry_date = start_date + timedelta(days=3)
+    plans[username] ={"plan": "free-trial", "expiry_date": expiry_date}
+    return jsonify({"message": "Free trial activated for 3 days", "expiry_date": expiry_date})
+@app.route("/check-expiry", methods=["GET"])
+def check_expiry():
+    username = request.args.get("username")
+    if username not in plans:
+       return jsonify({"message": "No active plan."})
+    expiry_date = plans[username]["expiry_date"]
+    if datetime.now() > expiry_date:
+       return jsonify({"status": "expired", "message": "Your plan has expired."})
+    else:
+        return jsonify({"status": "active", "expiry_date": expiry_date})
 @app.route("/use-friend-internet/<int:friend_id>", methods=["POST"])
 @token_required
 def use_friend_internt(current_user, friend_id):
@@ -126,6 +159,14 @@ def config_settings(current_user):
       data = request.json
       return jsonify({"message": "Settings saved", "data": data})
     return jsonify({"theme": "blue-white", "notifications": True})
+@app.route("/background-sync", methods=["POST"])
+def background_sync():
+    now = datetime.now()
+    expired_users = []
+    for user, details in plans.items():
+        if now > details["expiry_date"]:
+           expired_user.append(user)
+    return jsonify({"message": "Background sync complete.", "expired_users": expired_users})
 @app.route('/')
 def home():
     return jsonify({"message": "Flask is working"})
